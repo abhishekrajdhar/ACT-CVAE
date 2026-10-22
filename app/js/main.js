@@ -337,12 +337,17 @@ addEventListener('resize', () => {
 const clock = new THREE.Clock();
 let frames = 0, fpsClock = 0, previewTick = 0;
 
+let paused = false;
+
 function frame() {
   requestAnimationFrame(frame);
   const dt = clock.getDelta();
   if ((fpsClock += dt) >= 1) { $('stat-fps').textContent = frames; frames = 0; fpsClock = 0; }
   frames++;
+  if (!paused) step(dt);
+}
 
+function step(dt) {
   car.update(dt, world.colliders);
   car.placeDriverCamera(driverCam);
   car.placeChaseCamera(chaseCam);
@@ -368,6 +373,17 @@ function frame() {
   $('stat-steer').textContent = car.steering.toFixed(2);
 
   renderer.render(scene, viewCam);
+}
+
+// ?debug exposes a fixed-timestep driver for tests and screenshots on slow GPUs:
+//   fork.pause(); fork.run(240)  // advance 4 s of sim at 60 Hz
+if (new URLSearchParams(location.search).has('debug')) {
+  window.fork = {
+    car, state, setMode, setIntent, engage, loadPolicy,
+    pause: () => { paused = true; },
+    resume: () => { paused = false; clock.getDelta(); },
+    run(n, dt = 1 / 60) { for (let i = 0; i < n; i++) step(dt); },
+  };
 }
 
 renderScore();
