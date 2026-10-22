@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fork Road Pilot</title>
+  <meta name="description" content="Language-conditioned ACT + CVAE driving policy running live in the browser.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap">
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+  { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.js" } }
+  </script>
+</head>
+<body>
+  <canvas id="viewport"></canvas>
+
+  <header class="topbar glass">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+        <path d="M16 30V18M16 18L7 6M16 18l9-12" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+        <circle cx="16" cy="18" r="3" fill="currentColor"/>
+      </svg>
+      <div>
+        <div class="brand-name">Fork Road Pilot</div>
+        <div class="brand-sub">ACT · Language · CVAE</div>
+      </div>
+    </div>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-mode="drive" role="tab">Drive &amp; Record</button>
+      <button class="tab" data-mode="autopilot" role="tab">Autopilot</button>
+      <button class="tab ghost" id="btn-arch">Model</button>
+    </nav>
+
+    <div class="downloads">
+      <a href="train.ipynb" download>Notebook</a>
+      <a href="train.py" download>train.py</a>
+      <a href="model.json" download>model.json</a>
+    </div>
+  </header>
+
+  <section class="intent glass">
+    <div class="label">Language instruction</div>
+    <div class="segmented" id="intent">
+      <button data-intent="0" class="active"><span class="kbd">1</span> Take the left road</button>
+      <button data-intent="1"><span class="kbd">2</span> Take the right road</button>
+    </div>
+    <div class="cam" id="camera-label">Chase cam · <span class="kbd">C</span></div>
+  </section>
+
+  <!-- Drive & record -->
+  <section class="dock glass" id="panel-drive">
+    <div class="stats">
+      <div><span>Speed</span><b id="stat-speed">0.0</b></div>
+      <div><span>Steer</span><b id="stat-steer">0.00</b></div>
+      <div><span>Samples</span><b id="stat-samples">0</b></div>
+      <div><span>FPS</span><b id="stat-fps">0</b></div>
+    </div>
+    <div class="row">
+      <button class="btn red" id="btn-record"><span class="dot"></span><span id="record-text">Record</span> <span class="kbd">R</span></button>
+      <button class="btn" id="btn-download" disabled>Download dataset <span class="kbd">D</span></button>
+      <button class="btn quiet" id="btn-clear">Clear</button>
+    </div>
+    <p class="hint">Pick an instruction, press <span class="kbd">R</span>, and drive the matching road with the arrow keys. The JSON works as-is with <code>train.py</code> (<code>DATA_DIR</code>).</p>
+  </section>
+
+  <!-- Autopilot -->
+  <section class="dock glass hidden" id="panel-autopilot">
+    <div class="model-row">
+      <div class="model-status">
+        <span class="status-dot" id="model-dot"></span>
+        <div>
+          <div id="model-name">No model loaded</div>
+          <div class="muted" id="model-info">Loading the bundled model…</div>
+        </div>
+      </div>
+      <label class="btn quiet file">
+        Load other model.json
+        <input type="file" id="model-file" accept=".json,application/json">
+      </label>
+    </div>
+    <div class="row">
+      <button class="btn green wide" id="btn-engage" disabled>Engage autopilot <span class="kbd">P</span></button>
+      <div class="segmented small" id="control-mode">
+        <button data-mode="smooth" class="active" title="Steer = P(left) − P(right)">Smooth</button>
+        <button data-mode="binary" title="Discrete left/right using thresholds">Thresholded</button>
+      </div>
+    </div>
+    <details class="thresholds">
+      <summary>Thresholds</summary>
+      <label>Forward <input type="range" id="th-fwd" min="0" max="100" value="30"><output>0.30</output></label>
+      <label>Left min <input type="range" id="th-left" min="0" max="100" value="30"><output>0.30</output></label>
+      <label>Right min <input type="range" id="th-right" min="0" max="100" value="30"><output>0.30</output></label>
+      <label>Turn margin <input type="range" id="th-diff" min="0" max="50" value="5"><output>0.05</output></label>
+    </details>
+    <p class="hint">Drop a <code>model.json</code> anywhere on the page to swap models. Arrow keys take back control.</p>
+  </section>
+
+  <!-- Right column: what the model sees + what it thinks -->
+  <aside class="side">
+    <div class="card glass">
+      <div class="card-title">Model view <span class="muted">128×128</span></div>
+      <canvas id="fpv" width="192" height="192"></canvas>
+    </div>
+
+    <div class="card glass hidden" id="card-policy">
+      <div class="card-title">Policy output <span class="muted" id="latency">–</span></div>
+      <div class="bars">
+        <div class="bar"><span>Fwd</span><i><em id="bar-f" class="f"></em></i><b id="val-f">–</b></div>
+        <div class="bar"><span>Left</span><i><em id="bar-l" class="l"></em></i><b id="val-l">–</b></div>
+        <div class="bar"><span>Right</span><i><em id="bar-r" class="r"></em></i><b id="val-r">–</b></div>
+      </div>
+      <div class="card-title sub">Action chunk <span class="muted">K = 5</span></div>
+      <div class="chunk" id="chunk"></div>
+    </div>
+
+    <div class="card glass hidden" id="card-score">
+      <div class="card-title">Route check <button class="link" id="btn-reset-score">reset</button></div>
+      <div class="score">
+        <div><span>Runs</span><b id="sc-runs">0</b></div>
+        <div><span>Followed</span><b id="sc-ok">–</b></div>
+        <div><span>Left / Right</span><b id="sc-lr">0 / 0</b></div>
+        <div><span>Crashes</span><b id="sc-crash">0</b></div>
+      </div>
+      <ol class="log" id="run-log"></ol>
+    </div>
+  </aside>
+
+  <footer class="keys">
+    <span><span class="kbd">← ↑ → ↓</span> drive</span>
+    <span><span class="kbd">Space</span> brake</span>
+    <span><span class="kbd">1</span>/<span class="kbd">2</span> instruction</span>
+    <span><span class="kbd">C</span> camera</span>
+    <span><span class="kbd">P</span> autopilot</span>
+  </footer>
+
+  <div class="toast" id="toast"></div>
+  <div class="dropveil" id="dropveil">Drop model.json to load it</div>
+
+  <dialog id="arch">
+    <div class="arch-head">
+      <h2>Language-conditioned ACT + CVAE</h2>
+      <button class="link" id="arch-close" aria-label="Close">✕</button>
+    </div>
+    <svg viewBox="0 0 900 230" class="arch-svg" role="img" aria-label="Model architecture diagram">
+      <defs><marker id="ah" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8z" class="arrowhead"/></marker></defs>
+      <g class="node vis"><rect x="10" y="120" width="96" height="56" rx="10"/><text x="58" y="144">Camera</text><text x="58" y="162" class="s">3×128×128</text></g>
+      <g class="node vis"><rect x="136" y="120" width="96" height="56" rx="10"/><text x="184" y="144">CNN ×4</text><text x="184" y="162" class="s">stride 2 → 8×8×64</text></g>
+      <g class="node vis"><rect x="262" y="120" width="104" height="56" rx="10"/><text x="314" y="144">64 tokens</text><text x="314" y="162" class="s">+ learned pos</text></g>
+      <g class="node lang"><rect x="262" y="20" width="104" height="50" rx="10"/><text x="314" y="42">Language</text><text x="314" y="58" class="s">embedding (1 tok)</text></g>
+      <g class="node z"><rect x="392" y="20" width="104" height="50" rx="10"/><text x="444" y="42">z token</text><text x="444" y="58" class="s">CVAE · z=0 at test</text></g>
+      <g class="node vis"><rect x="404" y="120" width="120" height="56" rx="10"/><text x="464" y="144">Encoder</text><text x="464" y="162" class="s">66 tokens · 2 heads</text></g>
+      <g class="node act"><rect x="560" y="120" width="130" height="56" rx="10"/><text x="625" y="144">Decoder</text><text x="625" y="162" class="s">5 queries + lang</text></g>
+      <g class="node act"><rect x="726" y="120" width="160" height="56" rx="10"/><text x="806" y="144">Action chunk</text><text x="806" y="162" class="s">5 × [F, B, L, R] · sigmoid</text></g>
+      <g class="edge">
+        <path d="M106 148H134"/><path d="M232 148H260"/><path d="M366 148H402"/><path d="M524 148H558"/><path d="M690 148H724"/>
+        <path d="M314 70V90H450V118"/><path d="M444 70V118"/><path d="M366 45H600V118"/>
+      </g>
+    </svg>
+    <div class="arch-meta" id="arch-meta"></div>
+    <p class="muted arch-note">Training: an MLP encodes the ground-truth 5-step action chunk into μ, σ; z is sampled and injected as an extra encoder token (KL weight 0.01). At inference z = 0, so the policy outputs the prior-mean chunk. The app executes the 5 actions one per frame, then queries the model again.</p>
+  </dialog>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
